@@ -41,7 +41,7 @@ class RaftNode:
         port: int,
         peers: List[str],
         heartbeat_interval: float = 0.15,
-        election_timeout_range: tuple[float, float] = (0.5, 0.8),
+        election_timeout_range: tuple[float, float] = (2.0, 3.0),
     ) -> None:
         self.id = node_id
         self.host = host
@@ -68,7 +68,8 @@ class RaftNode:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        self._client = httpx.AsyncClient(timeout=5.0)
+        # UPDATE THIS LINE:
+        self._client = httpx.AsyncClient(timeout=0.5)
         self._tasks.append(asyncio.create_task(self._run_election_timer()))
         logger.info("Node %s started with peers %s", self.id, self.peers)
 
@@ -91,14 +92,18 @@ class RaftNode:
         return entry.index, entry.term
 
     async def _run_election_timer(self) -> None:
+        current_timeout = random.uniform(*self._election_timeout_range)
+        
         while not self._stop_event.is_set():
             await asyncio.sleep(0.05)
             if self.state == "leader":
                 continue
+                
             elapsed = time.monotonic() - self._last_heartbeat
-            timeout = random.uniform(*self._election_timeout_range)
-            if elapsed >= timeout:
+            
+            if elapsed >= current_timeout:
                 await self._start_election()
+                current_timeout = random.uniform(*self._election_timeout_range)
 
     async def _start_election(self) -> None:
         async with self._lock:
@@ -106,6 +111,7 @@ class RaftNode:
             self.current_term += 1
             self.voted_for = self.id
             self.leader_id = None
+            self._last_heartbeat = time.monotonic()  
             votes = 1
             term = self.current_term
             last_index, last_term = self._last_log_index_term()
@@ -132,6 +138,7 @@ class RaftNode:
             async with self._lock:
                 self.state = "follower"
                 self.voted_for = None
+                self._last_heartbeat = time.monotonic()
 
     async def _become_leader(self) -> None:
         async with self._lock:
@@ -146,7 +153,8 @@ class RaftNode:
 
     async def _heartbeat_loop(self) -> None:
         while not self._stop_event.is_set() and self.state == "leader":
-            await self.replicate(entries=[])
+            # FIX 2: Correct call to stateless replicate
+            await self.replicate()
             await asyncio.sleep(self._heartbeat_interval)
 
     # ------------------------------- RPC senders ------------------------------
@@ -166,18 +174,25 @@ class RaftNode:
             resp.raise_for_status()
             return VoteResponse(**resp.json())
         except Exception as exc:  # noqa: BLE001
-            logger.warning("Vote request to %s failed: %s", peer, exc)
             return None
 
-    async def replicate(self, entries: Optional[List[LogEntry]] = None) -> None:
+    # FIX 3: Stateless replication to prevent concurrency race conditions
+    async def replicate(self) -> None:
         if self.state != "leader" or not self._client:
             return
-        entries = entries or []
+            
         tasks = []
+        has_new_entries = False
+        
         for peer in self.peers:
             prev_index = self.next_index.get(peer, 1) - 1
             prev_term = self.log[prev_index - 1].term if prev_index > 0 and prev_index <= len(self.log) else 0
-            payload_entries = [LogEntryModel(index=e.index, term=e.term, payload=e.payload).model_dump() for e in entries]
+            
+            entries_to_send = self.log[prev_index:]
+            if entries_to_send:
+                has_new_entries = True
+                
+            payload_entries = [LogEntryModel(index=e.index, term=e.term, payload=e.payload).model_dump() for e in entries_to_send]
             req = AppendEntriesRequest(
                 term=self.current_term,
                 leader_id=self.id,
@@ -187,8 +202,9 @@ class RaftNode:
                 leader_commit=self.commit_index,
             )
             tasks.append(self._send_append_entries(peer, req))
+            
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        await self._handle_replication_results(results, entries)
+        await self._handle_replication_results(results, has_new_entries)
 
     async def _send_append_entries(self, peer: str, req: AppendEntriesRequest) -> Optional[AppendEntriesResponse]:
         try:
@@ -196,7 +212,6 @@ class RaftNode:
             resp.raise_for_status()
             return AppendEntriesResponse(**resp.json())
         except Exception as exc:  # noqa: BLE001
-            logger.warning("AppendEntries to %s failed: %s", peer, exc)
             return None
 
     async def _send_sync_log(self, peer: str, from_index: int) -> Optional[AppendEntriesResponse]:
@@ -210,12 +225,12 @@ class RaftNode:
             resp.raise_for_status()
             return AppendEntriesResponse(**resp.json())
         except Exception as exc:  # noqa: BLE001
-            logger.warning("SyncLog to %s failed: %s", peer, exc)
             return None
 
-    async def _handle_replication_results(self, results: List[Any], sent_entries: List[LogEntry]) -> None:
-        if not sent_entries:
+    async def _handle_replication_results(self, results: List[Any], has_new_entries: bool) -> None:
+        if not has_new_entries:
             return
+            
         for peer, res in zip(self.peers, results, strict=False):
             if not isinstance(res, AppendEntriesResponse):
                 continue
@@ -229,7 +244,6 @@ class RaftNode:
                 self.match_index[peer] = res.match_index
                 self.next_index[peer] = res.match_index + 1
             else:
-                # follower requests sync from reported length
                 await self._send_sync_log(peer, res.follower_len)
         await self._advance_commit_index()
 
@@ -254,25 +268,33 @@ class RaftNode:
             can_vote = self.voted_for in (None, req.candidate_id)
             if can_vote and up_to_date:
                 self.voted_for = req.candidate_id
-                self._last_heartbeat = time.monotonic()
+                self._last_heartbeat = time.monotonic() 
                 return VoteResponse(term=self.current_term, vote_granted=True, voter_id=self.id)
             return VoteResponse(term=self.current_term, vote_granted=False, voter_id=self.id)
 
+    # FIX 4: Correctly truncate follower logs to prevent corrupted trails on recovery
     async def handle_append_entries(self, req: AppendEntriesRequest) -> AppendEntriesResponse:
         async with self._lock:
             if req.term < self.current_term:
                 return AppendEntriesResponse(term=self.current_term, success=False, match_index=len(self.log), follower_id=self.id, follower_len=len(self.log))
+            
             self._last_heartbeat = time.monotonic()
+            
             if req.term > self.current_term:
                 self.current_term = req.term
                 self.state = "follower"
                 self.voted_for = None
+            
+            if req.term == self.current_term and self.state == "leader" and req.leader_id != self.id:
+                self.state = "follower"
+                self.leader_id = req.leader_id
+                
             self.leader_id = req.leader_id
-            # consistency check
+            
             if req.prev_log_index > 0:
                 if req.prev_log_index > len(self.log) or self.log[req.prev_log_index - 1].term != req.prev_log_term:
                     return AppendEntriesResponse(term=self.current_term, success=False, match_index=len(self.log), follower_id=self.id, follower_len=len(self.log))
-            # append new entries
+            
             new_entries = [LogEntry(index=e.index, term=e.term, payload=e.payload) for e in req.entries]
             for entry in new_entries:
                 local_index = entry.index - 1
@@ -282,31 +304,37 @@ class RaftNode:
                         self.log.append(entry)
                 else:
                     self.log.append(entry)
+                    
             if req.leader_commit > self.commit_index:
                 self.commit_index = min(req.leader_commit, len(self.log))
+                
             return AppendEntriesResponse(term=self.current_term, success=True, match_index=len(self.log), follower_id=self.id, follower_len=len(self.log))
 
     async def handle_sync_log(self, req: SyncLogResponse) -> AppendEntriesResponse:
         async with self._lock:
             self.current_term = max(self.current_term, req.term)
-            entries = [LogEntry(index=e.index, term=e.term, payload=e.payload) for e in req.entries]
-            for entry in entries:
-                local_index = entry.index - 1
-                if local_index < len(self.log):
-                    self.log[local_index] = entry
-                else:
-                    self.log.append(entry)
+            
+            if req.entries:
+                first_sync_index = req.entries[0].index
+                self.log = self.log[:first_sync_index - 1] 
+                
+                for e in req.entries:
+                    self.log.append(LogEntry(index=e.index, term=e.term, payload=e.payload))
+                    
             self.commit_index = max(self.commit_index, req.commit_index)
             return AppendEntriesResponse(term=self.current_term, success=True, match_index=len(self.log), follower_id=self.id, follower_len=len(self.log))
 
+    # FIX 5: Fire-and-forget task prevents blocking on heavy concurrent drawing
     async def handle_submit_stroke(self, req: SubmitStrokeRequest) -> Dict[str, Any]:
         if self.state != "leader":
             return {"accepted": False, "leader": self.leader_id}
+            
         async with self._lock:
             new_index = len(self.log) + 1
             entry = LogEntry(index=new_index, term=self.current_term, payload=req.stroke)
             self.log.append(entry)
-        await self.replicate(entries=[entry])
+            
+        asyncio.create_task(self.replicate())
         return {"accepted": True, "index": new_index}
 
     async def snapshot(self) -> HealthResponse:

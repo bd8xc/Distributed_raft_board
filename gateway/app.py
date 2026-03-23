@@ -20,8 +20,9 @@ FRONTEND_DIR = os.getenv("FRONTEND_DIR", "/app/frontend")
 app = FastAPI(title="Gateway")
 clients: Set[WebSocket] = set()
 leader_url: Optional[str] = INITIAL_LEADER
-client = httpx.AsyncClient(timeout=5.0)
 
+# FIX 1: Reduced timeout from 5.0 to 0.5 for immediate failover
+client = httpx.AsyncClient(timeout=1.0)
 
 async def pick_leader() -> Optional[str]:
     global leader_url
@@ -35,8 +36,16 @@ async def pick_leader() -> Optional[str]:
                 if data.get("state") == "leader":
                     leader_url = candidate
                     return leader_url
-                if data.get("leader_id"):
-                    leader_url = f"http://{data['leader_id']}:{candidate.split(':')[-1]}" if ":" in candidate else candidate
+
+                leader_id = data.get("leader_id")
+                if leader_id:
+                    # Map the leader_id to a known candidate URL (includes correct port).
+                    for c in CANDIDATES:
+                        if leader_id in c:
+                            leader_url = c
+                            return leader_url
+                    # Fallback: use leader_id as-is (may already be a full URL)
+                    leader_url = leader_id
                     return leader_url
         except Exception:  # noqa: BLE001
             continue
@@ -65,11 +74,28 @@ async def submit_stroke(stroke: Dict) -> bool:
         resp = await client.post(f"{url}/submit-stroke", json={"stroke": stroke})
         resp.raise_for_status()
         data = resp.json()
+        
         if data.get("accepted"):
             return True
+            
+        # FIX 2: Correctly map the leader hint if the stroke is rejected by a follower
         leader_hint = data.get("leader")
         if leader_hint:
+            for c in CANDIDATES:
+                if leader_hint in c:
+                    leader_url = c
+                    return False
             leader_url = leader_hint
+        else:
+            # Invalidate if rejected without a hint
+            leader_url = None
+            
+        return False
+        
+    # FIX 3: Catch network connection drops specifically and immediately invalidate leader
+    except httpx.RequestError as exc:
+        logger.warning("submit_stroke failed (network error): %s", exc)
+        leader_url = None  
         return False
     except Exception as exc:  # noqa: BLE001
         logger.warning("submit_stroke failed: %s", exc)

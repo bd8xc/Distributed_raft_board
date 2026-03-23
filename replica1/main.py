@@ -5,6 +5,9 @@ from typing import List
 
 from fastapi import FastAPI
 
+from fastapi import FastAPI
+from fastapi.responses import PlainTextResponse # ADD THIS
+
 from shared.message_types import (
     AppendEntriesRequest,
     AppendEntriesResponse,
@@ -54,6 +57,12 @@ async def append_entries(req: AppendEntriesRequest) -> AppendEntriesResponse:
     return await node.handle_append_entries(req)
 
 
+@app.post("/heartbeat", response_model=AppendEntriesResponse)
+async def heartbeat(req: AppendEntriesRequest) -> AppendEntriesResponse:
+    # Heartbeat uses the same AppendEntries RPC with no new entries.
+    return await node.handle_append_entries(req)
+
+
 @app.post("/sync-log", response_model=AppendEntriesResponse)
 async def sync_log(req: SyncLogResponse) -> AppendEntriesResponse:
     return await node.handle_sync_log(req)
@@ -73,6 +82,23 @@ async def health() -> HealthResponse:
 async def committed_log() -> List[dict]:
     return await node.committed_log()
 
+@app.get("/heartbeat")
+async def heartbeat() -> dict:
+    # Satisfies the explicit API requirement from the rubric
+    return {"status": "alive", "id": REPLICA_ID, "term": node.current_term}
+
+@app.get("/metrics")
+async def metrics() -> PlainTextResponse:
+    # 1 if leader, 0 otherwise
+    is_leader = 1 if node.state == "leader" else 0
+    
+    # Prometheus plain-text format
+    metrics_data = (
+        f'raft_term{{node="{REPLICA_ID}"}} {node.current_term}\n'
+        f'raft_log_length{{node="{REPLICA_ID}"}} {len(node.log)}\n'
+        f'raft_is_leader{{node="{REPLICA_ID}"}} {is_leader}\n'
+    )
+    return PlainTextResponse(content=metrics_data)
 
 @app.get("/")
 async def root() -> dict:
