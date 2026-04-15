@@ -40,8 +40,8 @@ class RaftNode:
         host: str,
         port: int,
         peers: List[str],
-        heartbeat_interval: float = 0.15,
-        election_timeout_range: tuple[float, float] = (2.0, 3.0),
+        heartbeat_interval: float = 0.05,
+        election_timeout_range: tuple[float, float] = (0.5, 2.0),
     ) -> None:
         self.id = node_id
         self.host = host
@@ -66,10 +66,10 @@ class RaftNode:
         self._tasks: List[asyncio.Task] = []
         self._client: Optional[httpx.AsyncClient] = None
         self._lock = asyncio.Lock()
+        self._last_election_failed = 0.0
 
     async def start(self) -> None:
-        # UPDATE THIS LINE:
-        self._client = httpx.AsyncClient(timeout=0.5)
+        self._client = httpx.AsyncClient(timeout=5.0)
         self._tasks.append(asyncio.create_task(self._run_election_timer()))
         logger.info("Node %s started with peers %s", self.id, self.peers)
 
@@ -83,7 +83,7 @@ class RaftNode:
 
     # --------------------------- state transitions ---------------------------
     def _majority(self) -> int:
-        return len(self.peers) // 2 + 1
+        return max(2, len(self.peers) // 2 + 1)
 
     def _last_log_index_term(self) -> tuple[int, int]:
         if not self.log:
@@ -92,13 +92,17 @@ class RaftNode:
         return entry.index, entry.term
 
     async def _run_election_timer(self) -> None:
+        await asyncio.sleep(random.uniform(*self._election_timeout_range))
         current_timeout = random.uniform(*self._election_timeout_range)
         
         while not self._stop_event.is_set():
             await asyncio.sleep(0.05)
             if self.state == "leader":
                 continue
-                
+            
+            if time.monotonic() - self._last_election_failed < 4.0:
+                continue
+                 
             elapsed = time.monotonic() - self._last_heartbeat
             
             if elapsed >= current_timeout:
@@ -106,6 +110,7 @@ class RaftNode:
                 current_timeout = random.uniform(*self._election_timeout_range)
 
     async def _start_election(self) -> None:
+        req_term = 0
         async with self._lock:
             self.state = "candidate"
             self.current_term += 1
@@ -113,23 +118,24 @@ class RaftNode:
             self.leader_id = None
             self._last_heartbeat = time.monotonic()  
             votes = 1
-            term = self.current_term
+            req_term = self.current_term
             last_index, last_term = self._last_log_index_term()
-            logger.info("%s starting election for term %s", self.id, term)
+            logger.info("%s starting election for term %s", self.id, req_term)
 
         responses = await asyncio.gather(
-            *[self._send_vote_request(peer, term, last_index, last_term) for peer in self.peers],
+            *[self._send_vote_request(peer, req_term, last_index, last_term) for peer in self.peers],
             return_exceptions=True,
         )
 
         for res in responses:
-            if isinstance(res, VoteResponse) and res.vote_granted and res.term == term:
+            if isinstance(res, VoteResponse) and res.vote_granted and res.term >= req_term:
                 votes += 1
-            elif isinstance(res, VoteResponse) and res.term > term:
+            elif isinstance(res, VoteResponse) and res.term > req_term:
                 async with self._lock:
                     self.current_term = res.term
                     self.state = "follower"
                     self.voted_for = None
+                self._last_election_failed = time.monotonic()
                 return
 
         if votes >= self._majority():
@@ -138,7 +144,7 @@ class RaftNode:
             async with self._lock:
                 self.state = "follower"
                 self.voted_for = None
-                self._last_heartbeat = time.monotonic()
+            self._last_election_failed = time.monotonic()
 
     async def _become_leader(self) -> None:
         async with self._lock:
@@ -148,12 +154,12 @@ class RaftNode:
             self.next_index = {peer: last_index + 1 for peer in self.peers}
             self.match_index = {peer: 0 for peer in self.peers}
             self._last_heartbeat = time.monotonic()
+            self._last_election_failed = 0.0
         logger.info("%s became leader for term %s", self.id, self.current_term)
         self._tasks.append(asyncio.create_task(self._heartbeat_loop()))
 
     async def _heartbeat_loop(self) -> None:
         while not self._stop_event.is_set() and self.state == "leader":
-            # FIX 2: Correct call to stateless replicate
             await self.replicate()
             await asyncio.sleep(self._heartbeat_interval)
 
@@ -176,7 +182,6 @@ class RaftNode:
         except Exception as exc:  # noqa: BLE001
             return None
 
-    # FIX 3: Stateless replication to prevent concurrency race conditions
     async def replicate(self) -> None:
         if self.state != "leader" or not self._client:
             return
@@ -228,9 +233,6 @@ class RaftNode:
             return None
 
     async def _handle_replication_results(self, results: List[Any], has_new_entries: bool) -> None:
-        if not has_new_entries:
-            return
-            
         for peer, res in zip(self.peers, results, strict=False):
             if not isinstance(res, AppendEntriesResponse):
                 continue
@@ -245,7 +247,8 @@ class RaftNode:
                 self.next_index[peer] = res.match_index + 1
             else:
                 await self._send_sync_log(peer, res.follower_len)
-        await self._advance_commit_index()
+        if has_new_entries:
+            await self._advance_commit_index()
 
     async def _advance_commit_index(self) -> None:
         match_indexes = list(self.match_index.values()) + [len(self.log)]
@@ -268,11 +271,11 @@ class RaftNode:
             can_vote = self.voted_for in (None, req.candidate_id)
             if can_vote and up_to_date:
                 self.voted_for = req.candidate_id
-                self._last_heartbeat = time.monotonic() 
+                self._last_heartbeat = time.monotonic()
+                self._last_election_failed = time.monotonic() + 10.0
                 return VoteResponse(term=self.current_term, vote_granted=True, voter_id=self.id)
             return VoteResponse(term=self.current_term, vote_granted=False, voter_id=self.id)
 
-    # FIX 4: Correctly truncate follower logs to prevent corrupted trails on recovery
     async def handle_append_entries(self, req: AppendEntriesRequest) -> AppendEntriesResponse:
         async with self._lock:
             if req.term < self.current_term:
@@ -324,7 +327,6 @@ class RaftNode:
             self.commit_index = max(self.commit_index, req.commit_index)
             return AppendEntriesResponse(term=self.current_term, success=True, match_index=len(self.log), follower_id=self.id, follower_len=len(self.log))
 
-    # FIX 5: Fire-and-forget task prevents blocking on heavy concurrent drawing
     async def handle_submit_stroke(self, req: SubmitStrokeRequest) -> Dict[str, Any]:
         if self.state != "leader":
             return {"accepted": False, "leader": self.leader_id}

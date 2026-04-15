@@ -20,11 +20,11 @@ from shared.raft_node import RaftNode
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-app = FastAPI(title="Mini RAFT Replica")
+app = FastAPI(title="Mini RAFT Replica 4")
 
-REPLICA_ID = os.getenv("REPLICA_ID", "replica2")
+REPLICA_ID = os.getenv("REPLICA_ID", "replica4")
 RPC_HOST = os.getenv("RPC_HOST", "0.0.0.0")
-RPC_PORT = int(os.getenv("RPC_PORT", "5001"))
+RPC_PORT = int(os.getenv("RPC_PORT", "5003"))
 PEERS = os.getenv("PEERS", "").split()
 
 node = RaftNode(
@@ -57,7 +57,6 @@ async def append_entries(req: AppendEntriesRequest) -> AppendEntriesResponse:
 
 @app.post("/heartbeat", response_model=AppendEntriesResponse)
 async def heartbeat(req: AppendEntriesRequest) -> AppendEntriesResponse:
-    # Heartbeat uses the same AppendEntries RPC with no new entries.
     return await node.handle_append_entries(req)
 
 
@@ -80,22 +79,23 @@ async def health() -> HealthResponse:
 async def committed_log() -> List[dict]:
     return await node.committed_log()
 
+
 @app.get("/ping")
 async def ping() -> dict:
     return {"status": "alive", "id": REPLICA_ID, "term": node.current_term}
 
+
 @app.get("/metrics")
 async def metrics() -> PlainTextResponse:
-    # 1 if leader, 0 otherwise
     is_leader = 1 if node.state == "leader" else 0
     
-    # Prometheus plain-text format
     metrics_data = (
         f'raft_term{{node="{REPLICA_ID}"}} {node.current_term}\n'
         f'raft_log_length{{node="{REPLICA_ID}"}} {len(node.log)}\n'
         f'raft_is_leader{{node="{REPLICA_ID}"}} {is_leader}\n'
     )
     return PlainTextResponse(content=metrics_data)
+
 
 @app.get("/")
 async def root() -> dict:

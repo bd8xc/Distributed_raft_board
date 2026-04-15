@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RAFT Cluster Dashboard</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #0b1526;
+      color: #f5f7fb;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 16px 24px;
+      background: linear-gradient(90deg, #1a2740, #123358);
+      border-radius: 12px;
+      margin-bottom: 24px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.3);
+    }
+    h1 {
+      font-size: 24px;
+      letter-spacing: 0.5px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    h1::before {
+      content: '📊';
+      font-size: 28px;
+    }
+    .cluster-status {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 14px;
+      padding: 8px 16px;
+      background: rgba(255,255,255,0.1);
+      border-radius: 20px;
+    }
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #4ade80;
+      animation: pulse 2s infinite;
+    }
+    .status-dot.warning { background: #fbbf24; }
+    .status-dot.error { background: #ef4444; animation: none; }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+    .dashboard {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 20px;
+      margin-bottom: 24px;
+    }
+    .card {
+      background: #1a2740;
+      border-radius: 12px;
+      padding: 20px;
+      border: 2px solid transparent;
+      transition: all 0.3s ease;
+      box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+    }
+    .card.leader {
+      border-color: #22c55e;
+      background: linear-gradient(135deg, #1a2740 0%, #0f3d1f 100%);
+    }
+    .card.candidate {
+      border-color: #eab308;
+      background: linear-gradient(135deg, #1a2740 0%, #3d3510 100%);
+    }
+    .card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid rgba(255,255,255,0.1);
+    }
+    .card-title {
+      font-size: 18px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .state-badge {
+      padding: 4px 12px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .state-badge.leader { background: #22c55e; color: #000; }
+    .state-badge.follower { background: #64748b; color: #fff; }
+    .state-badge.candidate { background: #eab308; color: #000; }
+    .metrics {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .metric {
+      background: rgba(0,0,0,0.2);
+      padding: 12px;
+      border-radius: 8px;
+    }
+    .metric-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      color: #94a3b8;
+      margin-bottom: 4px;
+      letter-spacing: 0.5px;
+    }
+    .metric-value {
+      font-size: 20px;
+      font-weight: 700;
+      color: #61dafb;
+    }
+    .metric-value.term { color: #a78bfa; }
+    .metric-value.log { color: #f472b6; }
+    .full-width { grid-column: span 2; }
+    .footer {
+      text-align: center;
+      color: #64748b;
+      font-size: 12px;
+      padding: 20px;
+    }
+    .footer span { color: #61dafb; }
+    .legend {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      margin-bottom: 20px;
+      padding: 12px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 8px;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+    }
+    .legend-dot {
+      width: 12px;
+      height: 12px;
+      border-radius: 50%;
+    }
+    .legend-dot.leader { background: #22c55e; }
+    .legend-dot.follower { background: #64748b; }
+    .legend-dot.candidate { background: #eab308; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>RAFT Cluster Dashboard</h1>
+    <div class="cluster-status">
+      <div class="status-dot" id="clusterDot"></div>
+      <span id="clusterStatus">Checking...</span>
+    </div>
+  </header>
+
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-dot leader"></div>
+      <span>Leader</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot follower"></div>
+      <span>Follower</span>
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot candidate"></div>
+      <span>Candidate</span>
+    </div>
+  </div>
+
+  <div class="dashboard" id="dashboard">
+    <div class="card" id="card-replica1">
+      <div class="card-header">
+        <div class="card-title">⚙️ Replica 1</div>
+        <span class="state-badge follower" id="state-replica1">Loading...</span>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">Term</div>
+          <div class="metric-value term" id="term-replica1">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Log Size</div>
+          <div class="metric-value log" id="log-replica1">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Commit Index</div>
+          <div class="metric-value" id="commit-replica1">-</div>
+        </div>
+        <div class="metric full-width">
+          <div class="metric-label">Leader ID</div>
+          <div class="metric-value" id="leader-replica1" style="font-size: 14px; color: #94a3b8;">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="card-replica2">
+      <div class="card-header">
+        <div class="card-title">⚙️ Replica 2</div>
+        <span class="state-badge follower" id="state-replica2">Loading...</span>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">Term</div>
+          <div class="metric-value term" id="term-replica2">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Log Size</div>
+          <div class="metric-value log" id="log-replica2">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Commit Index</div>
+          <div class="metric-value" id="commit-replica2">-</div>
+        </div>
+        <div class="metric full-width">
+          <div class="metric-label">Leader ID</div>
+          <div class="metric-value" id="leader-replica2" style="font-size: 14px; color: #94a3b8;">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="card-replica3">
+      <div class="card-header">
+        <div class="card-title">⚙️ Replica 3</div>
+        <span class="state-badge follower" id="state-replica3">Loading...</span>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">Term</div>
+          <div class="metric-value term" id="term-replica3">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Log Size</div>
+          <div class="metric-value log" id="log-replica3">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Commit Index</div>
+          <div class="metric-value" id="commit-replica3">-</div>
+        </div>
+        <div class="metric full-width">
+          <div class="metric-label">Leader ID</div>
+          <div class="metric-value" id="leader-replica3" style="font-size: 14px; color: #94a3b8;">-</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="card-replica4">
+      <div class="card-header">
+        <div class="card-title">⚙️ Replica 4</div>
+        <span class="state-badge follower" id="state-replica4">Offline</span>
+      </div>
+      <div class="metrics">
+        <div class="metric">
+          <div class="metric-label">Term</div>
+          <div class="metric-value term" id="term-replica4">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Log Size</div>
+          <div class="metric-value log" id="log-replica4">-</div>
+        </div>
+        <div class="metric">
+          <div class="metric-label">Commit Index</div>
+          <div class="metric-value" id="commit-replica4">-</div>
+        </div>
+        <div class="metric full-width">
+          <div class="metric-label">Leader ID</div>
+          <div class="metric-value" id="leader-replica4" style="font-size: 14px; color: #94a3b8;">-</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="footer">
+    Auto-refresh every <span>2 seconds</span> | Last update: <span id="lastUpdate">-</span>
+  </div>
+
+  <script>
+    const REPLICA_IDS = ['replica1', 'replica2', 'replica3', 'replica4'];
+
+    function formatTime() {
+      const now = new Date();
+      return now.toLocaleTimeString();
+    }
+
+    async function updateDashboard() {
+      try {
+        const resp = await fetch('/api/replicas');
+        const results = await resp.json();
+        let leaderFound = false;
+        let onlineCount = 0;
+
+        REPLICA_IDS.forEach((id, i) => {
+          const data = results[i] || {};
+          const card = document.getElementById(`card-${id}`);
+          const stateBadge = document.getElementById(`state-${id}`);
+          const termEl = document.getElementById(`term-${id}`);
+          const logEl = document.getElementById(`log-${id}`);
+          const commitEl = document.getElementById(`commit-${id}`);
+          const leaderEl = document.getElementById(`leader-${id}`);
+
+          card.className = 'card';
+
+          if (data && data.state && data.state !== 'offline') {
+            onlineCount++;
+            stateBadge.textContent = data.state.toUpperCase();
+            stateBadge.className = `state-badge ${data.state}`;
+            
+            if (data.state === 'leader') {
+              card.classList.add('leader');
+              leaderFound = true;
+            } else if (data.state === 'candidate') {
+              card.classList.add('candidate');
+            }
+
+            termEl.textContent = data.term;
+            logEl.textContent = data.log_length;
+            commitEl.textContent = data.commit_index;
+            leaderEl.textContent = data.leader_id || 'None';
+          } else {
+            stateBadge.textContent = 'OFFLINE';
+            stateBadge.className = 'state-badge follower';
+            termEl.textContent = '-';
+            logEl.textContent = '-';
+            commitEl.textContent = '-';
+            leaderEl.textContent = 'N/A';
+          }
+        });
+
+        const clusterDot = document.getElementById('clusterDot');
+        const clusterStatus = document.getElementById('clusterStatus');
+        
+        if (onlineCount === 0) {
+          clusterDot.className = 'status-dot error';
+          clusterStatus.textContent = 'All replicas offline';
+        } else if (!leaderFound) {
+          clusterDot.className = 'status-dot warning';
+          clusterStatus.textContent = `No leader (${onlineCount}/${REPLICA_IDS.length} online)`;
+        } else {
+          clusterDot.className = 'status-dot';
+          clusterStatus.textContent = `${onlineCount}/${REPLICA_IDS.length} replicas online`;
+        }
+
+        document.getElementById('lastUpdate').textContent = formatTime();
+      } catch (err) {
+        console.error('Failed to fetch replica data:', err);
+      }
+    }
+
+    updateDashboard();
+    setInterval(updateDashboard, 2000);
+  </script>
+</body>
+</html>

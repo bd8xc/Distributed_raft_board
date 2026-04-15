@@ -4,9 +4,7 @@ import logging
 from typing import List
 
 from fastapi import FastAPI
-
-from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse 
+from fastapi.responses import PlainTextResponse
 
 from shared.message_types import (
     AppendEntriesRequest,
@@ -82,9 +80,8 @@ async def health() -> HealthResponse:
 async def committed_log() -> List[dict]:
     return await node.committed_log()
 
-@app.get("/heartbeat")
-async def heartbeat() -> dict:
-    # Satisfies the explicit API requirement from the rubric
+@app.get("/ping")
+async def ping() -> dict:
     return {"status": "alive", "id": REPLICA_ID, "term": node.current_term}
 
 @app.get("/metrics")

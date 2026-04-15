@@ -4,4 +4,4 @@ global:
 scrape_configs:
   - job_name: "raft_cluster"
     static_configs:
-      - targets: ["replica1:5000", "replica2:5001", "replica3:5002"]
+      - targets: ["replica1:5000", "replica2:5001", "replica3:5002", "replica4:5003"]

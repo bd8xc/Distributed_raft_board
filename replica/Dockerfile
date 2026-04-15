@@ -10,7 +10,6 @@ COPY replica/requirements.txt /app/replica/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY shared /app/shared
-# Default source in image; compose bind mounts override at runtime.
 COPY replica1 /app/replica
 
-CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${RPC_PORT:-5000} --reload"]
+CMD ["sh", "-c", "uvicorn main:app --host 0.0.0.0 --port ${RPC_PORT:-5000} --reload --reload-dir=/app/replica --reload-dir=/app/shared"]
